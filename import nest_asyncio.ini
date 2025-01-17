@@ -1,0 +1,176 @@
+import nest_asyncio
+nest_asyncio.apply()
+import aiosqlite
+import asyncio
+import logging
+from aiogram import F
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from aiogram.utils.keyboard import ReplyKeyboardBuilder
+
+# Замените 'YOUR_TOKEN_HERE' на ваш токен бота
+bot = Bot(token='7580256720:AAH855b9BMMDY_m37SWGUU8B_0nswMqTOeY')
+dp = Dispatcher()
+
+DB_NAME = 'quiz_bot.db'  # Укажите имя вашей базы данных
+quiz_data = [
+    {
+        'question': 'Какой язык программирования используется для веб-разработки?',
+        'options': ['Python', 'JavaScript', 'C++', 'Java'],
+        'correct_option': 1,
+    },
+    {
+        'question': 'Какой из этих языков является языком разметки?',
+        'options': ['HTML', 'CSS', 'JavaScript', 'Python'],
+        'correct_option': 0,
+    },
+    {
+        'question': 'Что такое CSS?',
+        'options': ['Каскадные таблицы стилей', 'Системный язык стилей', 'Язык программирования', 'Язык разметки'],
+        'correct_option': 0,
+    },
+    {
+        'question': 'Какой из этих языков является языком программирования?',
+        'options': ['HTML', 'CSS', 'JavaScript', 'SQL'],
+        'correct_option': 2,
+    },
+    {
+        'question': 'Что такое SQL?',
+        'options': ['Язык запросов к базе данных', 'Язык разметки', 'Язык стилей', 'Язык программирования'],
+        'correct_option': 0,
+    },
+    {
+        'question': 'Какой из этих языков используется для создания мобильных приложений?',
+        'options': ['Java', 'HTML', 'CSS', 'PHP'],
+        'correct_option': 0,
+    },
+    {
+        'question': 'Что такое Git?',
+        'options': ['Система контроля версий', 'Язык программирования', 'Редактор кода', 'Система управления базами данных'],
+        'correct_option': 0,
+    },
+    {
+        'question': 'Какой из этих фреймворков используется для разработки на Python?',
+        'options': ['Django', 'React', 'Angular', 'Vue.js'],
+        'correct_option': 0,
+    },
+    {
+        'question': 'Что такое API?',
+        'options': ['Интерфейс программирования приложений', 'Программный интерфейс для пользователей', 'Язык программирования', 'Система управления данными'],
+        'correct_option': 0,
+    },
+    {
+        'question': 'Какой из этих языков является языком серверной разработки?',
+        'options': ['PHP', 'HTML', 'CSS', 'JavaScript'],
+        'correct_option': 0,
+    },
+]
+
+async def create_table():
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, question_index INTEGER)''')
+        await db.execute('''CREATE TABLE IF NOT EXISTS results (user_id INTEGER, score INTEGER, PRIMARY KEY(user_id))''')
+        await db.commit()
+
+
+async def get_quiz_index(user_id):
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute("SELECT question_index FROM users WHERE user_id = ?", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else 0  # Возвращаем 0, если нет записей
+
+async def update_quiz_index(user_id, index):
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("INSERT OR REPLACE INTO users (user_id, question_index) VALUES (?, ?)", (user_id, index))
+        await db.commit()
+
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    builder = ReplyKeyboardBuilder()
+    builder.add(types.KeyboardButton(text="Начать игру"))
+    await message.answer("Добро пожаловать в квиз!", reply_markup=builder.as_markup(resize_keyboard=True))
+
+@dp.message(F.text == "Начать игру")
+async def start_game(message: types.Message):
+    user_id = message.from_user.id
+    await update_quiz_index(user_id, 0)  # Сброс индекса вопроса
+    await get_question(message, user_id)
+
+@dp.message(lambda message: message.text in [option for q in quiz_data for option in q['options']])
+async def handle_answer(message: types.Message):
+    user_id = message.from_user.id
+    current_index = await get_quiz_index(user_id)
+    current_question = quiz_data[current_index]
+
+    # Переход к следующему вопросу
+    if message.text == current_question['options'][current_question['correct_option']]:
+        await message.answer("Правильный ответ!")
+        score = await update_user_score(user_id, 1)  # Увеличиваем счёт на 1
+        next_index = current_index + 1
+        if next_index < len(quiz_data):
+            await update_quiz_index(user_id, next_index)
+            await get_question(message, user_id)
+        else:
+            await finish_quiz(message, user_id, score)  # Завершение викторины
+    else:
+        await message.answer("Неправильный ответ. Попробуйте еще раз.")
+
+async def get_question(message: types.Message, user_id: int):
+    current_question_index = await get_quiz_index(user_id)
+
+    if current_question_index >= len(quiz_data):
+        await message.answer("Квиз завершен. Спасибо за участие!")
+        return
+
+    question_data = quiz_data[current_question_index]
+    opts = question_data['options']
+
+    kb = generate_options_keyboard(opts)
+    await message.answer(question_data['question'], reply_markup=kb)
+
+def generate_options_keyboard(options):
+    builder = ReplyKeyboardBuilder()
+    for option in options:
+        builder.add(types.KeyboardButton(text=option))
+    return builder.as_markup(resize_keyboard=True)
+
+async def main():
+    await create_table()  # Создаем таблицу при запуске
+    await dp.start_polling(bot)
+
+# Функция для обновления результатов пользователей после прохождения квиза.
+async def update_user_score(user_id, increment=0):
+    async with aiosqlite.connect(DB_NAME) as db:
+        # Получаем текущий счёт
+        cursor = await db.execute("SELECT score FROM results WHERE user_id = ?", (user_id,))
+        row = await cursor.fetchone()
+        current_score = row[0] if row else 0
+        new_score = current_score + increment
+
+        await db.execute("INSERT OR REPLACE INTO results (user_id, score) VALUES (?, ?)", (user_id, new_score))
+        await db.commit()
+        return new_score
+
+# Функция завершения квиза и отображения результата игрока.
+async def finish_quiz(message: types.Message, user_id, score):
+    await message.answer(f"Квиз завершен! Ваш результат: {score} из {len(quiz_data)}")
+    await show_statistics(message)
+
+# Функция отображения статистики прохождения игроков.
+async def show_statistics(message: types.Message):
+    stats = await get_user_statistics()
+    stats_message = "Статистика игроков:\n"
+    for user_id, score in stats:
+        stats_message += f"Пользователь {user_id}: {score} из {len(quiz_data)}\n"
+    await message.answer(stats_message)
+
+# Функция для получения статистики пользователей.
+async def get_user_statistics():
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute("SELECT user_id, score FROM results") as cursor:
+            rows = await cursor.fetchall()
+            return rows
+
+if __name__ == '__main__':
+    import asyncio
+    asyncio.run(main())
